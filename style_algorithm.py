@@ -20,7 +20,7 @@ preferences_df = pd.DataFrame(columns=['preference_id', 'access_id', 'ai_id', 'g
 selections_df = pd.DataFrame(columns=['preference_id', 'iteration', 'image', 'style', 'feedback', 'score_change', 'current_score'])
 profiles_df = pd.DataFrame(columns=['preference_id', 'top_styles', 'selection_history'])
 
-CSV_DIR = './'
+CSV_DIR = '/Users/terminator/Downloads/Data/haider-bhai/algo/data'
 os.makedirs(CSV_DIR, exist_ok=True)
 
 PREFERENCES_CSV = os.path.join(CSV_DIR, 'preferences.csv')
@@ -56,7 +56,7 @@ def create_app():
         }
     })
     setup_image_routes(app)
-   
+
     class StylePreferenceAlgorithm:
         def __init__(self):
             self.s3_handler = S3Handler()
@@ -77,12 +77,10 @@ def create_app():
                     if style not in self.score_manager.style_scores:
                         self.score_manager.style_scores[style] = 0.0
 
-            # Start new cycle if needed
             if not self.styles_in_current_cycle:
                 self.styles_in_current_cycle = self.mandatory_styles.intersection(self.available_styles)
                 self.current_cycle += 1
 
-            # Try to use styles that haven't been shown in current cycle
             if self.styles_in_current_cycle:
                 selected_style = random.choice(list(self.styles_in_current_cycle))
                 if selected_style in available_images and available_images[selected_style]:
@@ -93,7 +91,6 @@ def create_app():
                         self.score_manager.style_last_shown[selected_style] = time.time()
                         return selected_image, selected_style
 
-            # Fallback to normal selection if all mandatory styles used or no images available
             exploration_scores, current_time = self.image_selector.calculate_exploration_scores(
                 available_images,
                 self.score_manager.style_scores,
@@ -103,9 +100,8 @@ def create_app():
 
             selected_style = self.image_selector.select_style(exploration_scores, available_images)
             selected_image = self.image_selector.select_image(available_images, selected_style)
-            
+
             if not selected_image:
-                # Try remaining styles with available images
                 remaining_styles = [s for s in self.available_styles if available_images[s]]
                 if remaining_styles:
                     selected_style = random.choice(remaining_styles)
@@ -121,7 +117,7 @@ def create_app():
         def update_scores(self, style, feedback, image_key):
             adjusted_weight = self.score_manager.update_scores(style, feedback)
             current_score = self.score_manager.style_scores[style]
-    
+
             self.user_selections.append({
                 'image': image_key,
                 'style': style,
@@ -135,131 +131,177 @@ def create_app():
             return self.user_selections
 
         def get_top_styles(self):
-            return self.results_manager.normalize_scores(self.score_manager.style_scores)
+            # Get normalized scores as a list of tuples (style, score)
+            normalized_scores = self.results_manager.normalize_scores(self.score_manager.style_scores)
+            # Convert to dictionary with float values
+            return {style: float(score) for style, score in normalized_scores}
 
-    def run_style_quiz():
-        while True:
-            gender = input("Please enter your gender (men/women): ").lower()
-            if gender in ['men', 'women']:
-                break
-            print("Invalid input. Please enter 'men' or 'women'.")
+    # Existing endpoints remain unchanged here...
 
-        algorithm = StylePreferenceAlgorithm()
-        available_images = algorithm.s3_handler.get_available_images(gender)
-    
-        if not available_images:
-            print("No images available. Please check the connection and try again.")
-            return
-
-        for i in range(30):
-            image_key, style = algorithm.select_next_image(gender, available_images)
-            if not image_key:
-                print("No more unique images available.")
-                break
-
-            url = algorithm.s3_handler.get_image_url(image_key)
-            if not url:
-                continue
-
-            print(f"\nImage {i+1}/30")
-            print(f"Please view the image at: {url}")
-        
-            feedback = get_user_feedback()
-            algorithm.update_scores(style, feedback, image_key)
-
-        display_results(algorithm.get_top_styles(), algorithm.get_selection_history())
-
-    def generate_ai_id(access_id):
-        return f"AI_{access_id}_{str(uuid.uuid4())[:8]}"
-
-    # Add this new endpoint to your Flask app
-    @app.route('/api')
-    def health_check():
-        return jsonify({'status': 'ok'})
-
-    @app.route('/api/preference', methods=['POST'])
-    def create_preference():
-        global preferences_df
-        data = request.get_json()
-        access_id = data.get('access_id')
-        gender = data.get('gender')
-    
-        if not access_id or gender not in ['men', 'women']:
-            return jsonify({'error': 'Invalid parameters'}), 400
-    
-        ai_id = generate_ai_id(access_id)
-        preference_id = str(uuid.uuid4())
-    
-        algorithm = StylePreferenceAlgorithm()
-    
-        # Store preference information
-        new_preference = pd.DataFrame([{
-            'preference_id': preference_id,
-            'access_id': access_id,
-            'ai_id': ai_id,
-            'gender': gender,
-            'current_iteration': 0,
-            'completed': False,
-            'algorithm': algorithm
-        }])
-    
-        preferences_df = pd.concat([preferences_df, new_preference], ignore_index=True)
-        preferences_df.to_csv(PREFERENCES_CSV, index=False)  # Save after concat
-    
-        return jsonify({
-            'preference_id': preference_id,
-            'ai_id': ai_id
-        })
-
-    @app.route('/api/preference/<preference_id>/next-image', methods=['GET'])
-    def get_next_image(preference_id):
+    # New First Iteration GET Endpoint
+    @app.route('/api/preference/<preference_id>/iteration/1', methods=['GET'])
+    def get_first_iteration(preference_id):
         ai_id = request.headers.get('AI-ID')
-    
+
         try:
             preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
             if preference_match.empty:
                 return jsonify({'error': 'Preference not found'}), 404
-            
+
             preference = preference_match.iloc[0]
             if preference['ai_id'] != ai_id:
                 return jsonify({'error': 'Invalid AI ID'}), 401
 
-            current_iteration = int(preference['current_iteration'])  # Convert to regular int
-            if current_iteration >= 30:
-                return jsonify({'error': 'Quiz completed'}), 400
+            if int(preference['current_iteration']) != 0:
+                return jsonify({'error': 'First iteration already completed'}), 400
 
             algorithm = preference['algorithm']
             available_images = algorithm.s3_handler.get_available_images(preference['gender'])
             image_key, style = algorithm.select_next_image(preference['gender'], available_images)
-            
+
             if not image_key:
                 return jsonify({'error': 'No more images available'}), 400
 
             url = algorithm.s3_handler.get_image_url(image_key)
-            
-            # Convert numeric values to Python native types
+            unique_image_id = str(uuid.uuid4())
+
+            if not hasattr(app, 'pending_images'):
+                app.pending_images = {}
+
+            app.pending_images[unique_image_id] = {
+                'image_key': image_key,
+                'style': style,
+                'preference_id': preference_id,
+                'iteration': 1,
+                'timestamp': time.time()
+            }
+
             return jsonify({
                 'image_url': str(url),
-                'iteration': int(current_iteration + 1),
-                'style': str(style),
-                'image_key': str(image_key)
+                'image_id': unique_image_id
             })
-            
+
+        except Exception as e:
+            return jsonify({'error': f'Failed to get first image: {str(e)}'}), 400
+
+    # New First Iteration POST Endpoint
+    @app.route('/api/preference/<preference_id>/iteration/1', methods=['POST'])
+    def process_first_iteration(preference_id):
+        data = request.get_json()
+        ai_id = request.headers.get('AI-ID')
+        feedback = data.get('feedback')
+        image_id = data.get('image_id')
+
+        if not all([ai_id, feedback, image_id]) or feedback not in ['like', 'dislike']:
+            return jsonify({'error': 'Invalid parameters'}), 400
+
+        try:
+            if not hasattr(app, 'pending_images') or image_id not in app.pending_images:
+                return jsonify({'error': 'Invalid or expired image ID'}), 400
+
+            pending_image = app.pending_images[image_id]
+            if pending_image['preference_id'] != preference_id:
+                return jsonify({'error': 'Invalid image ID for this preference'}), 400
+
+            preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
+            if preference_match.empty:
+                return jsonify({'error': 'Preference not found'}), 404
+
+            preference = preference_match.iloc[0]
+            if preference['ai_id'] != ai_id:
+                return jsonify({'error': 'Invalid AI ID'}), 401
+
+            algorithm = preference['algorithm']
+            algorithm.update_scores(pending_image['style'], feedback, pending_image['image_key'])
+
+            preferences_df.loc[preferences_df['preference_id'] == preference_id, 'current_iteration'] = 1
+            preferences_df.to_csv(PREFERENCES_CSV, index=False)
+
+            del app.pending_images[image_id]
+
+            return jsonify({
+                'iteration': 1,
+                'completed': False
+            })
+
+        except Exception as e:
+            return jsonify({'error': f'Failed to process first iteration: {str(e)}'}), 400
+
+    # Existing endpoints continue unchanged here...
+    # Existing endpoints continued...
+
+    @app.route('/api/preference/<preference_id>/iteration/<int:iteration_id>', methods=['GET'])
+    def get_iteration_image(preference_id, iteration_id):
+        if iteration_id == 1:
+            return jsonify({'error': 'Use /iteration/1 endpoint for first iteration'}), 400
+        if iteration_id < 2 or iteration_id > 30:
+            return jsonify({'error': 'Invalid iteration ID'}), 400
+
+        ai_id = request.headers.get('AI-ID')
+
+        try:
+            preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
+            if preference_match.empty:
+                return jsonify({'error': 'Preference not found'}), 404
+
+            preference = preference_match.iloc[0]
+            if preference['ai_id'] != ai_id:
+                return jsonify({'error': 'Invalid AI ID'}), 401
+
+            current_iteration = int(preference['current_iteration'])
+            if current_iteration != iteration_id - 1:
+                return jsonify({'error': 'Invalid iteration sequence'}), 400
+
+            algorithm = preference['algorithm']
+            available_images = algorithm.s3_handler.get_available_images(preference['gender'])
+            image_key, style = algorithm.select_next_image(preference['gender'], available_images)
+
+            if not image_key:
+                return jsonify({'error': 'No more images available'}), 400
+
+            url = algorithm.s3_handler.get_image_url(image_key)
+            unique_image_id = str(uuid.uuid4())
+
+            if not hasattr(app, 'pending_images'):
+                app.pending_images = {}
+
+            app.pending_images[unique_image_id] = {
+                'image_key': image_key,
+                'style': style,
+                'preference_id': preference_id,
+                'iteration': iteration_id,
+                'timestamp': time.time()
+            }
+
+            return jsonify({
+                'image_url': str(url),
+                'image_id': unique_image_id
+            })
+
         except Exception as e:
             return jsonify({'error': f'Failed to get next image: {str(e)}'}), 400
 
     @app.route('/api/preference/<preference_id>/iteration/<int:iteration_id>', methods=['POST'])
     def process_iteration(preference_id, iteration_id):
+        if iteration_id == 1:
+            return jsonify({'error': 'Use /iteration/1 endpoint for first iteration'}), 400
+
         data = request.get_json()
         ai_id = request.headers.get('AI-ID')
         feedback = data.get('feedback')
-        style = data.get('style')
-        image_key = data.get('image_key')
+        image_id = data.get('image_id')
     
-        if not all([ai_id, feedback, style, image_key]) or feedback not in ['like', 'dislike']:
+        if not all([ai_id, feedback, image_id]) or feedback not in ['like', 'dislike']:
             return jsonify({'error': 'Invalid parameters'}), 400
     
         try:
+            if not hasattr(app, 'pending_images') or image_id not in app.pending_images:
+                return jsonify({'error': 'Invalid or expired image ID'}), 400
+
+            pending_image = app.pending_images[image_id]
+            if pending_image['preference_id'] != preference_id:
+                return jsonify({'error': 'Invalid image ID for this preference'}), 400
+
             preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
             if preference_match.empty:
                 return jsonify({'error': 'Preference not found'}), 404
@@ -267,21 +309,18 @@ def create_app():
             preference = preference_match.iloc[0]
             if preference['ai_id'] != ai_id:
                 return jsonify({'error': 'Invalid AI ID'}), 401
-        
-            if iteration_id != preference['current_iteration'] + 1:
-                return jsonify({'error': 'Invalid iteration ID'}), 400
-        
+
             algorithm = preference['algorithm']
-            algorithm.update_scores(style, feedback, image_key)
+            algorithm.update_scores(pending_image['style'], feedback, pending_image['image_key'])
             
-            # Update current iteration
+            # Update current iteration and completed status
             preferences_df.loc[preferences_df['preference_id'] == preference_id, 'current_iteration'] = iteration_id
-            
-            selections_df.to_csv(SELECTIONS_CSV, index=False)  # Save selections_df after updating iteration
-            
-            # Check if quiz is completed
             if iteration_id == 30:
                 preferences_df.loc[preferences_df['preference_id'] == preference_id, 'completed'] = True
+            preferences_df.to_csv(PREFERENCES_CSV, index=False)
+            
+            # Clean up
+            del app.pending_images[image_id]
             
             return jsonify({
                 'iteration': iteration_id,
@@ -294,71 +333,112 @@ def create_app():
     @app.route('/api/preference/<preference_id>/profile', methods=['POST'])
     def save_profile(preference_id):
         ai_id = request.headers.get('AI-ID')
-    
-        # Verify AI ID and preference
-        preference = preferences_df[preferences_df['preference_id'] == preference_id].iloc[0]
+
+        preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
+        if preference_match.empty:
+            return jsonify({'error': 'Preference not found'}), 404
+
+        preference = preference_match.iloc[0]
         if preference['ai_id'] != ai_id:
             return jsonify({'error': 'Invalid AI ID'}), 401
-    
+
         if not preference['completed']:
             return jsonify({'error': 'Profile not completed'}), 400
-    
+
         algorithm = preference['algorithm']
-    
-        # Convert top_styles to dictionary if it's not already
-        top_styles = algorithm.get_top_styles()
-        if isinstance(top_styles, list):
-            top_styles = {str(i): style for i, style in enumerate(top_styles)}
-    
-        # Save profile with properly formatted data
-        # Convert Python objects to JSON-compatible strings
+        
+        # Get and format the data
+        top_styles = algorithm.get_top_styles()  # Now returns a dictionary
+        selection_history = algorithm.get_selection_history()
+
+        # Remove any existing profile
+        global profiles_df
+        profiles_df = profiles_df[profiles_df['preference_id'] != preference_id]
+
+        # Add new profile
         new_profile = pd.DataFrame([{
             'preference_id': preference_id,
             'top_styles': json.dumps(top_styles),
-            'selection_history': json.dumps(algorithm.get_selection_history())
+            'selection_history': json.dumps(selection_history)
         }])
-    
-        global profiles_df
+
         profiles_df = pd.concat([profiles_df, new_profile], ignore_index=True)
-        profiles_df.to_csv(PROFILES_CSV, index=False)  # Save profiles_df after concat
-    
+        profiles_df.to_csv(PROFILES_CSV, index=False)
+
         return jsonify({'message': 'Profile saved successfully'})
 
     @app.route('/api/preference/<preference_id>/profile', methods=['GET'])
     def get_profile(preference_id):
         ai_id = request.headers.get('AI-ID')
-    
+
         try:
-            # Verify AI ID and preference
             preference_match = preferences_df[preferences_df['preference_id'] == preference_id]
             if preference_match.empty:
                 return jsonify({'error': 'Preference not found'}), 404
-            
+
             preference = preference_match.iloc[0]
             if preference['ai_id'] != ai_id:
                 return jsonify({'error': 'Invalid AI ID'}), 401
-            
-            # Check if profile exists
+
             profile_match = profiles_df[profiles_df['preference_id'] == preference_id]
             if profile_match.empty:
                 return jsonify({'error': 'Profile not found'}), 404
-                
-            profile = profile_match.iloc[0]
+
+            profile_data = profile_match.iloc[0]
             
-            # Parse the JSON strings back to Python objects
             try:
-                top_styles = json.loads(profile['top_styles']) if isinstance(profile['top_styles'], str) else profile['top_styles']
-                selection_history = json.loads(profile['selection_history']) if isinstance(profile['selection_history'], str) else profile['selection_history']
-            except json.JSONDecodeError:
-                return jsonify({'error': 'Invalid profile data format'}), 400
-            
+                top_styles = json.loads(profile_data['top_styles'])
+                selection_history = json.loads(profile_data['selection_history'])
+            except (json.JSONDecodeError, TypeError):
+                return jsonify({'error': 'Invalid profile data format'}), 500
+
             return jsonify({
                 'top_styles': top_styles,
                 'selection_history': selection_history
             })
-            
+
         except Exception as e:
             return jsonify({'error': f'Failed to retrieve profile: {str(e)}'}), 400
+    # Health-check and Preference creation endpoints (as in original provided code):
+    def generate_ai_id(access_id):
+        return f"AI_{access_id}_{str(uuid.uuid4())[:8]}"
+    
+    @app.route('/api')
+    def health_check():
+        return jsonify({'status': 'ok'})
+
+    @app.route('/api/preference', methods=['POST'])
+    def create_preference():
+        global preferences_df
+        data = request.get_json()
+        access_id = data.get('access_id')
+        gender = data.get('gender')
+
+        if not access_id or gender not in ['men', 'women']:
+            return jsonify({'error': 'Invalid parameters'}), 400
+
+        ai_id = generate_ai_id(access_id)
+        preference_id = str(uuid.uuid4())
+
+        algorithm = StylePreferenceAlgorithm()
+
+        new_preference = pd.DataFrame([{
+            'preference_id': preference_id,
+            'access_id': access_id,
+            'ai_id': ai_id,
+            'gender': gender,
+            'current_iteration': 0,
+            'completed': False,
+            'algorithm': algorithm
+        }])
+
+        preferences_df = pd.concat([preferences_df, new_preference], ignore_index=True)
+        preferences_df.to_csv(PREFERENCES_CSV, index=False)
+
+        return jsonify({
+            'preference_id': preference_id,
+            'ai_id': ai_id
+        })
 
     return app
 
